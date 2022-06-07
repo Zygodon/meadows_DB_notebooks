@@ -1,0 +1,174 @@
+---
+title: "Comparison of NVC standard frequencies with survey results"
+output:
+  html_document:
+    df_print: paged
+---
+# Example of data analysis using extracts from the meadows database.
+This demonstration uses data that can be downloaded in .csv format from the app "species_explorer": [https://sussexouse.shinyapps.io/Species_explorer/](https://sussexouse.shinyapps.io/Species_explorer/).
+Use the Download all button in the app to see it.
+
+View the code here. The function GetTheData is exactly as used in Species_explorer to extract a useful dataset from the database.
+```{r setup, echo=TRUE, warning=FALSE, message=FALSE}
+# Libraries
+library("RMySQL")
+library(tidyverse)
+
+# Functions
+dbDisconnectAll <- function(){
+  ile <- length(dbListConnections(MySQL())  )
+  lapply( dbListConnections(MySQL()), function(x) dbDisconnect(x) )
+  cat(sprintf("%s connection(s) closed.\n", ile))
+}
+
+GetTheData <-  function()
+{
+  # GET DATA FROM DB
+  # Remote DB with password
+  con <- dbConnect(MySQL(),
+                   user  = "guest",
+                   password    = "guest",
+                   dbname="meadows",
+                   port = 3306,
+                   host   = "sxouse.ddns.net")
+
+  q <- sprintf('select survey_id, assembly_name, quadrat_count, community, quadrat_id, visit_date, records_id, species.species_id, 
+    species.species_name from surveys
+      join quadrats on quadrats.survey_id = surveys_id
+      join visit_dates on quadrats.vd_id = visit_dates.vds_id
+      join records on records.quadrat_id = quadrats_id
+      join species on species.species_id = records.species_id
+    # Two assemblies have 0 quadrat count; exclude A.capillaris_stolonifera, 
+    # and some odd assemblies with no assigned nvc
+    where quadrat_count > 0 and species.species_id != 4 and major_nvc_community is not null;') 
+  # NOTE: this extract includes "MG5", i.e. some MG5 communities where the 
+  # team have not decided on a sub-group.
+  
+  rs1 = dbSendQuery(con, q)
+  return(as_tibble(fetch(rs1, n=-1)))
+  dbDisconnectAll()
+}
+
+########################## MAIN ##############################
+# GET DATA FROM DB
+the_data <- GetTheData()
+
+# NVC standard species counts for comparison
+stds <- tribble(
+  ~community, ~std_cnts, ~low, ~high,
+  "M10b",   37, 19, 56,
+  "M23",   19, 6, 39,
+  "M23a",   21, 6, 39,
+  "M23b",   17, 8, 28,
+  "M27b",   14, 6, 33,
+  "M27c",   15, 9, 22,
+  "M28b",   20, 10, 26,
+  "MG10",   13, 6, 24,
+  "MG10a",   12, 6, 20,
+  "MG10b",   15, 8, 24,
+  "MG13",   8, 3, 15,
+  "MG1b",   12, 3, 18,
+  "MG1c",   15, 4, 21,
+  "MG1e",   21, 11, 30,
+  "MG5",   23, 12, 38,
+  "MG5a",   22, 13, 32,
+  "MG5c",   22, 18, 27,
+  "MG6a",   13, 9, 20,
+  "MG6b",   14, 4, 26,
+  "MG7b",   8, 4, 14,
+  "MG7c",   11, 4, 19,
+  "MG7d",   9, 3, 14,
+  "MG8",   26, 15, 41,
+  "MG9a",   15, 7, 36
+)
+
+```
+
+Instructions about how to access the database using the phpMyAdmin interface can be found [here](https://zygodon.github.io/River-Ouse-Project-databases/).
+
+## Species counts by quadrat and survey.
+
+The following code demonstrates using data downloaded from the database to construct boxplots showing species counts on a per-quadrat (sample) basis, or per uniform vegetation stand (assembly).
+
+The published standards for species counts refer to counts in each quadrat (sample, in Rodwell's terms). It is usual for at least five quadrats to be used in surveying a single stand, so we may ask, how does the count for single quadrats compare to the count for the stand as a whole? Compare the two boxplots; when aggregated by survey, the species counts are higher than the standards - not surprisingly as a larger area (greater number of quadrats) is being sampled. 
+
+Does this give us a handle on questions of sampling efficiency, choice of quadrat size, and likely maximum species count?
+
+```{r}
+
+# Count the number of quadrats of each community
+# We may wish to limit the boxplot to communities with
+# 5 or more samples (quadrats)
+a <- (the_data
+      %>% select(quadrat_id, community)
+      %>% group_by(community)
+      %>% summarise(nvc_cnt = n_distinct(quadrat_id)))
+
+# Count the number of species in each sample (quadrat)
+# This is what we are interested in making a boxplot for.
+d <- (the_data %>% select(quadrat_id, community, species_name)
+      %>% group_by(quadrat_id, community) 
+      %>% summarise(sp_cnt = n_distinct(species_name)))
+
+# Left join and filter out communities with less than 20 examples
+d <- left_join(d, a, by = "community") 
+d <- left_join(d, stds, by = "community") %>% filter(nvc_cnt > 19)
+
+# Prepare xlab with the number of surveys for each community
+ns <- d %>% group_by(community) %>% distinct(nvc_cnt) %>% arrange(community)
+x_labels <- paste(levels(as.factor(d$community)),"\n(n=",ns$nvc_cnt,")",sep="")
+
+# Make the plot
+g <- ggplot(d, aes(community,sp_cnt)) +
+  coord_cartesian(ylim = c(0, 80)) +
+  geom_boxplot(varwidth = T) +
+  geom_point(y = d$std_cnts, colour = "red") +
+  theme(legend.position = "none") +
+  xlab("Assessed NVC community; red points standard counts") +
+  ylab("species count by quadrat") +
+  scale_x_discrete(labels = tolower(x_labels))
+print(g)
+
+```
+Followed by species_counts by survey:
+
+```{r}
+# Boxplot: species counts for communities aggregated over surveys;
+# communities with fewer than 4 examples excluded.
+
+# Count the number of surveys in each community
+# If there are only one or two, we won't want to include 
+# that community in the boxplot
+a <- (the_data 
+      %>% select(survey_id, community)
+      %>% group_by(community) 
+      %>% summarise(nvc_cnt = n_distinct(survey_id)))
+
+# Count the number of species at each survey site.
+# This is what we are interested in making a boxplot for.
+d <- (the_data %>% select(survey_id, community, species_name)
+               %>% group_by(survey_id, community) 
+               %>% summarise(sp_cnt = n_distinct(species_name)))
+
+# Left join and filter out communities with less than 4 examples
+d <- left_join(d, a, by = "community") 
+d <- left_join(d, stds, by = "community") %>% filter(nvc_cnt > 3)
+
+# Prepare xlab with the number of surveys for each community
+ns <- d %>% group_by(community) %>% distinct(nvc_cnt) %>% arrange(community)
+x_labels <- paste(levels(as.factor(d$community)),"\n(n=",ns$nvc_cnt,")",sep="")
+
+# Make the plot
+g <- ggplot(d, aes(community,sp_cnt)) +
+  coord_cartesian(ylim = c(0, 80)) +
+  geom_boxplot(varwidth = T) +
+  geom_point(y = d$std_cnts, colour = "red") +
+  theme(legend.position = "none") +
+  xlab("Assessed NVC community; red points standard counts") +
+  ylab("species count by survey") +
+  scale_x_discrete(labels = tolower(x_labels))
+print(g)
+
+```
+
+

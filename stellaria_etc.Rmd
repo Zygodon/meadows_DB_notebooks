@@ -1,0 +1,173 @@
+---
+title: "Stellaria notebook V2"
+output:
+  html_document:
+    df_print: paged
+fig.width: 6
+fig.height: 4
+---
+# About
+
+John P drew our attention to various species that were not shown as common in the NVC standards, but which we frequently find in our sites, notwithstanding they have been assessed as belonging to a community that "should" not have them at high frequency. Prominent among these is *Stellaria graminea*. The purpose of this notebook is to track the development of an application to find these unconforming species.
+
+Start by loading the data
+
+```{r}
+library(plotly)
+source("db_extract.R")
+the_data <- GetTheData()
+```
+
+And we're going to need species_frequency by survey; but maybe could decide to go by community?
+```{r}
+frequency_by_survey <- FrequencyBysurvey(the_data)
+frequency_by_community <- FrequencyByCommunity(the_data)
+```
+Let's plot mean frequency by survey vs frequency by community for *Stellaria graminea*:
+```{r}
+fba <- frequency_by_survey %>% select(survey_id, species_name, community, freq)
+fbc <- frequency_by_community %>% select(species_name,community, freq)
+jf <- left_join(fbc, fba, by = c("community", "species_name")) %>% filter(species_name == "Stellaria_graminea" & grepl("MG", community))
+f <- ggplot(jf, aes(freq.x, freq.y, colour = community)) +
+  geom_point()+
+  xlab("frequency by community") + ylab("frequency by survey")+
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1, colour ="red"))
+print(f)
+```
+
+
+```{r}
+```
+This is for *S. graminea* and the MG communities. So (a) there are lots more surveys than there are communities (of course) and (b) frequency by survey tends to be larger than frequency by community; aggregating over community has smoothed out a lot of variation. My feeling is that it will be more illuminating to eliminate the survey variable to start with, we can explore variability with survey later.
+
+Next question: how to compare with standard values. Explore select into table mg_rodwell in the meadows database ... in which we have columns community, species_id (and name, but not to be relied on) and p_central, the central frequency of the categories I .. V.
+
+*Stellaria graminea* id 139. It so happens that p_central == 0.1 for *S. graminea* for all MG communities:
+SELECT Community, species_id, p_central FROM meadows.mg_rodwell where Community like "MG%" && species_id = 139;
+( I wonder whether I can communicate directly with the DB from here using SQL?).
+
+Anyway, it seems quite possible to collect the p_central values for all species and plot against frequency by community
+
+```{r}
+q <- "SELECT Community, species_id, p_central FROM meadows.mg_rodwell where Community like 'MG%';"
+std_freqs <- query(q)
+```
+and match up with species frequencies by community
+```{r}
+rm(jf) # We don't need it any more
+jf1 <- left_join(frequency_by_community, std_freqs, by = c("community"="Community", "species_id"))
+
+```
+
+Lots of NAs here; (a) because mires (M) are included in the survey data but not in the mg_rodwell table - yet - because as its name implies, it is just the MG communities. And (b), because it seems we have detected some species that the standards don't list in those communities at all. So (a), filter out all the mires; (b) set the remaining NAs to zero.
+```{r}
+# Would be easier if we'd excluded mires from the_data to start with! 
+jf2 <- jf1 %>% filter(grepl("MG", community)) %>% replace_na(list(p_central = 0))
+rm(jf1)
+```
+So now we want filter to include only cases where CrI5 > p_central or CrI95 < p_central, and then plot (survey) frequencies against standard frequencies (p_central)
+```{r}
+jf3 <- jf2 %>% filter(CrI5 > p_central || CrI95 < p_central)
+f2 <- ggplot(jf3, aes(p_central, freq, colour = community)) +
+  geom_jitter(aes(text = species_name), size = 3) + #, name = "species_name")+
+  xlab("Standard frequency") + ylab("Survey frequency")+
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1, colour ="red"))
+ggplotly(f2) %>% layout(legend = list(orientation = "h", x = 0.4, y = -0.2))
+
+```
+This gives a surprising number of species in strong disagrrement with the standard (we may ignore the big cluster near (0, 0) because of the way CrI5 is calculated - it can be very near zero, but not actually zero). Interactive plot: is this useful?
+
+Even so, there's too many species here for this to be a useful way of exploring the data. Filter out low frequency species, and then perhaps present the data as an interactive table.
+
+### Reduce species count.
+There are `r nrow(the_data)` records. *Stellaria graminea* accounts for `r the_data %>% select(species_id, records_id) %>% filter(species_id == 139) %>% nrow()`
+or `r 100*(the_data %>% select(species_id, records_id) %>% filter(species_id == 139) %>% nrow())/nrow(the_data)`%, so suggest reducing the data to species with less than 2% of the count. To start with, we have `r the_data %>% select(species_id) %>% distinct() %>% nrow()` species. 
+```{r}
+d1 <- (the_data 
+       %>% select(records_id, species_id) 
+       %>% group_by(species_id) 
+       %>% summarise(cnt = n())
+       %>% mutate(frac = cnt/nrow(the_data))
+       %>% filter(frac >= 0.02))
+```
+Removing those accounting for less than 2% of the records leaves `r nrow(d1)` species.
+Make the reduced dataset and plot survey frequency vs standard again, coded by species:
+```{r}
+reduced <- left_join(d1, the_data, by = "species_id")
+jf4 <- left_join(d1, jf3, by = "species_id")
+f3 <- ggplot(jf4, aes(p_central, freq, colour = species_name)) +
+  geom_jitter(aes(text = community), size = 3) + 
+  xlab("Standard frequency") + ylab("Survey frequency")+
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), colour ="red")
+ggplotly(f3) %>% layout(legend = list(orientation = "h", x = 0.4, y = -0.2))
+
+```
+This looks much more useful. Community is now available in the interactive part. Using 13 classes: on reflection (a) it might be better to use the top 12 classes (allowing to use ColorBrewer Paired Class 12 for the legend); and (b), ultimately to analyse by community (group, as used for poster BES2019) and select the top twelve species for each community.
+
+Doing (b) first: sort out mg5a data:
+```{r}
+
+cf <- head(the_data 
+           %>% filter(community == "MG5a")
+           %>% group_by(species_id) 
+           %>% summarise(hits = n()) %>% arrange(desc(hits)), 12)
+d_mg5a <- the_data %>% filter(community == "MG5a") %>% right_join(cf, by = "species_id")
+fc_mg5a <- FrequencyByCommunity(d_mg5a)
+# Add standard frequencies
+fc_mg5a <- (left_join(fc_mg5a, std_freqs, by = c("community"="Community", "species_id")) 
+            %>% mutate(std_freq = replace_na(p_central, 0)) 
+            %>% select(-p_central))
+
+f4 <- ggplot(fc_mg5a, aes(std_freq, freq, colour = species_name)) +
+  geom_pointrange(aes(ymin = CrI5, ymax = CrI95, text = community), size = 3) + 
+  scale_colour_brewer(palette="Paired") +
+  xlab("Standard frequency") + ylab("Survey frequency") +
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), colour ="red")
+ggplotly(f4) %>% layout(legend = list(orientation = "h", x = 0.4, y = -0.2))
+
+```
+
+The credibility intervals are tiny because we are working with 200 - 300 hits and over 400 trials. It will be interesting to see how this changes on an survey basis, and in communities where we have less data.
+
+Let's try the same thing but on an survey basis:
+```{r}
+fa_mg5a <- FrequencyBysurvey(d_mg5a)
+# Add standard frequencies
+fa_mg5a <- (left_join(fa_mg5a, std_freqs, by = c("community"="Community", "species_id"))
+            %>% filter(!is.na(species_id))
+            %>% filter(!is.na(community))
+            %>% mutate(std_freq = replace_na(p_central, 0)) 
+            %>% select(-p_central))
+
+pd <- position_dodge(0.2)
+f5 <- ggplot(fa_mg5a, aes(std_freq, freq, colour = species_name)) +
+  geom_pointrange(aes(text = paste(assembly_name, community), ymin = CrI5, ymax = CrI95), size = 1, position = pd) +
+  scale_colour_brewer(palette="Paired") +
+  xlab("Standard frequency") + ylab("Survey frequency") +
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), colour ="red")  
+ggplotly(f5) %>% layout(legend = list(orientation = "h", x = 0.4, y = -0.2))
+
+```
+Which certainly makes the point about the credibility intervals, but is not otherwise very useful, so have to think of another way to deal with survey-level analysis.
+
+Single survey is nice:
+```{r}
+f6 <- ggplot(head(fa_mg5a, 11), aes(std_freq, freq, colour = species_name)) +
+  geom_pointrange(aes(text = assembly_name, ymin = CrI5, ymax = CrI95), size = 1, position = pd) +
+  scale_colour_brewer(palette="Paired") +
+  xlab("Standard frequency") + ylab("Survey frequency") +
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), colour ="red")
+  ggplotly(f6) %>% layout(legend = list(orientation = "h", x = 0.4, y = -0.2))
+
+```
+
+but really needs interactivity so we can search survey-by-survey. Bear in mind we have total `r nrow(the_data %>% select(survey_id) %>% distinct())
+` surveys, of which `r nrow(the_data %>% filter(community == "MG5a") %>% select(survey_id) %>% distinct())
+` are MG5a.
+
+Looks like this will need special treatment with a Shiny app, beyond the scope of this exploratory notebook.
+
+
+
+
+
